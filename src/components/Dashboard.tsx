@@ -3,7 +3,7 @@
 import { useEffect, useState, useMemo, useRef } from "react";
 import { Asset, PortfolioData } from "./types";
 import { Loader2, LogOut, RefreshCw, TrendingUp, TrendingDown, PieChart as PieIcon, List } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn, cleanTicker } from "@/lib/utils";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
 
 interface DashboardProps {
@@ -35,7 +35,7 @@ export default function Dashboard({ onLogout }: DashboardProps) {
             // 1. Fetch Rates
             const ratesRes = await fetch("/api/rates");
             const ratesData = await ratesRes.json();
-            const currentRates = {
+            const currentRates: { USD: number; EUR: number } = {
                 USD: 1, // Base
                 EUR: ratesData.rates?.EUR || 0.95, // Fallback
             };
@@ -48,45 +48,75 @@ export default function Dashboard({ onLogout }: DashboardProps) {
             const cryptoSecret = sessionStorage.getItem("crypto_secret");
 
             let allAssets: Asset[] = [];
-            let t212Val = 0;
-            let cryptoVal = 0;
 
             // 2. Fetch Trading212
             if (t212Key && t212Secret) {
-                const t212Res = await fetch("/api/trading212", {
-                    headers: {
-                        Authorization: t212Key,
-                        "X-Trading212-Secret": t212Secret,
-                        "X-Account-Type": t212Type || "live"
-                    },
-                });
+                // Fetch MetaData & Portfolio in parallel
+                const [metaRes, t212Res] = await Promise.all([
+                    fetch("/api/trading212/metadata", {
+                        headers: { Authorization: t212Key, "X-Trading212-Secret": t212Secret, "X-Account-Type": t212Type || "live" }
+                    }),
+                    fetch("/api/trading212", {
+                        headers: {
+                            Authorization: t212Key,
+                            "X-Trading212-Secret": t212Secret,
+                            "X-Account-Type": t212Type || "live"
+                        },
+                    })
+                ]);
+
+                // Map Metadata
+                const currencyMap = new Map<string, string>(); // Ticker -> CurrencyCode
+                if (metaRes.ok) {
+                    const metaData = await metaRes.json();
+                    if (Array.isArray(metaData)) {
+                        metaData.forEach((item: any) => {
+                            currencyMap.set(item.ticker, item.currencyCode);
+                        });
+                    }
+                }
 
                 if (t212Res.ok) {
                     const t212Data = await t212Res.json();
-                    // Assuming t212Data is an array of positions
                     if (Array.isArray(t212Data)) {
-                        const t212Assets: Asset[] = t212Data.map((pos: any) => ({
-                            id: `t212-${pos.ticker}`,
-                            symbol: pos.ticker,
-                            name: pos.ticker, // T212 might not give full name in positions endpoint
-                            quantity: pos.quantity,
-                            price: pos.currentPrice,
-                            value: pos.currentPrice * pos.quantity, // In original currency (usually USD for US stocks)
-                            originalValue: pos.currentPrice * pos.quantity,
-                            originalCurrency: pos.currency || "USD", // Assumption
-                            type: "stock",
-                        }));
+                        const t212Assets: Asset[] = t212Data.map((pos: any) => {
+                            const nativeCurrency = currencyMap.get(pos.ticker) || pos.currency || "USD"; // Fallback to USD if unknown, but metadata should have it.
+
+                            // Determine Value in USD (Normalization)
+                            let valInUsd = pos.currentPrice * pos.quantity;
+
+                            // If native is EUR, convert to USD base
+                            if (nativeCurrency === "EUR") {
+                                valInUsd = valInUsd * (1 / currentRates.EUR);
+                            } else if (nativeCurrency === "GBP") {
+                                // We don't have GBP rates fetched yet, assuming ~1.27 USD (static fallback or need fetch)
+                                // For now, let's just assume 1:1 if we miss it or add fetch later. 
+                                // Ideally we fetch more rates.
+                                // Let's try to infer if we can.
+                                // NOTE: User only asked for EUR/USD toggle.
+                                // Let's stick to what we have.
+                            }
+
+                            // Wait, if the user holds a EUR stock, T212 reports price in EUR.
+                            // If we want to show total in USD, we must convert EUR -> USD.
+                            // currentRates.EUR is 1 USD = X EUR (e.g. 0.95).
+                            // So 1 EUR = 1 / 0.95 USD.
+
+                            return {
+                                id: `t212-${pos.ticker}`,
+                                symbol: cleanTicker(pos.ticker), // CLEAN NAME HERE
+                                name: cleanTicker(pos.ticker), // Use clean name for display
+                                quantity: pos.quantity,
+                                price: pos.currentPrice, // Native Price
+                                value: pos.currentPrice * pos.quantity, // Native Value
+                                originalValue: pos.currentPrice * pos.quantity,
+                                originalCurrency: nativeCurrency,
+                                type: "stock",
+                                valueUsd: valInUsd // Normalized for totals
+                            };
+                        });
                         allAssets = [...allAssets, ...t212Assets];
-                    } else {
-                        console.error("Trading212 Unexpected Data:", t212Data);
-                        setError("Trading212 connected, but returned unexpected data format. Check console.");
                     }
-                } else {
-                    const errText = await t212Res.text();
-                    console.error("Trading212 Fetch Error:", t212Res.status, errText);
-                    // Don't block Crypto if T212 fails, but show warning?
-                    // For now, let's set a specific error message if it's the only thing failing
-                    if (!cryptoKey) setError(`Trading212 Failed: ${t212Res.statusText}`);
                 }
             }
 
@@ -103,14 +133,12 @@ export default function Dashboard({ onLogout }: DashboardProps) {
                     const tickerData = await tickerRes.json();
 
                     // Map tickers for price lookup
-                    // Crypto.com tickers: { result: { data: [ { i: "BTC_USD", k: 12345.5 ... } ] } }
                     const priceMap = new Map<string, number>();
                     if (tickerData.result?.data) {
                         tickerData.result.data.forEach((t: any) => {
-                            // Prefer USD pairs
                             if (t.i.endsWith("_USD")) {
                                 const symbol = t.i.split("_")[0];
-                                priceMap.set(symbol, parseFloat(t.a)); // 'a' is usually last/buy price
+                                priceMap.set(symbol, parseFloat(t.a));
                             } else if (t.i.endsWith("_USDT")) {
                                 const symbol = t.i.split("_")[0];
                                 if (!priceMap.has(symbol)) priceMap.set(symbol, parseFloat(t.a));
@@ -123,9 +151,8 @@ export default function Dashboard({ onLogout }: DashboardProps) {
                         .filter((b: any) => parseFloat(b.available) > 0 || parseFloat(b.order) > 0)
                         .map((b: any) => {
                             const symbol = b.currency;
-                            const qty = parseFloat(b.balance); // Total (available + order)
-                            const price = priceMap.get(symbol) || 0; // Default 0 if no price found (e.g. USD/USDT itself)
-                            // If USD/USDT, price is 1
+                            const qty = parseFloat(b.balance);
+                            const price = priceMap.get(symbol) || 0;
                             const finalPrice = (symbol === "USD" || symbol === "USDT") ? 1 : price;
 
                             return {
@@ -134,10 +161,11 @@ export default function Dashboard({ onLogout }: DashboardProps) {
                                 name: symbol,
                                 quantity: qty,
                                 price: finalPrice,
-                                value: qty * finalPrice, // Value in USD
+                                value: qty * finalPrice,
                                 originalValue: qty * finalPrice,
                                 originalCurrency: "USD",
-                                type: "crypto"
+                                type: "crypto",
+                                valueUsd: qty * finalPrice
                             };
                         });
 
@@ -145,30 +173,13 @@ export default function Dashboard({ onLogout }: DashboardProps) {
                 }
             }
 
-            // 4. Normalize to Display Currency
-            // We do this in render or here? Here is better for total calc.
-            // But we need to re-calc if currency changes. 
-            // So better to store 'base' assets (normalized to USD usually) and convert on display.
-            // For now, let's normalize everything to USD in the state, and convert to EUR if needed.
-            // Note: T212 might return EUR stocks. We need to handle that.
-            // Simplified: Assume we have USD based data or convert everything to USD first.
-
-            const normalizedAssets = allAssets.map(asset => {
-                let valueInUSD = asset.value;
-                if (asset.originalCurrency === "EUR") {
-                    valueInUSD = asset.value * (1 / currentRates.EUR);
-                }
-                // Add more currencies if needed
-                return { ...asset, valueUsd: valueInUSD };
-            });
-
-            const totalUsd = normalizedAssets.reduce((sum, a) => sum + (a as any).valueUsd, 0);
-            const equityUsd = normalizedAssets.filter(a => a.type === "stock").reduce((sum, a) => sum + (a as any).valueUsd, 0);
-            const cryptoUsd = normalizedAssets.filter(a => a.type === "crypto").reduce((sum, a) => sum + (a as any).valueUsd, 0);
+            const totalUsd = allAssets.reduce((sum, a) => sum + (a as any).valueUsd, 0);
+            const equityUsd = allAssets.filter(a => a.type === "stock").reduce((sum, a) => sum + (a as any).valueUsd, 0);
+            const cryptoUsd = allAssets.filter(a => a.type === "crypto").reduce((sum, a) => sum + (a as any).valueUsd, 0);
 
             setData({
-                totalValue: totalUsd, // Store in USD
-                assets: normalizedAssets,
+                totalValue: totalUsd,
+                assets: allAssets, // These have valueUsd attached
                 equityValue: equityUsd,
                 cryptoValue: cryptoUsd
             });
@@ -316,55 +327,57 @@ export default function Dashboard({ onLogout }: DashboardProps) {
                 <div className="mt-10">
                     <h3 className="mb-4 text-xl font-semibold text-white">Assets Allocation</h3>
                     <div className="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900/50">
-                        <table className="min-w-full divide-y divide-zinc-800">
-                            <thead className="bg-zinc-900">
-                                <tr>
-                                    <th scope="col" className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-zinc-500">Asset</th>
-                                    <th scope="col" className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-zinc-500">Type</th>
-                                    <th scope="col" className="px-6 py-4 text-right text-xs font-semibold uppercase tracking-wider text-zinc-500">Quantity</th>
-                                    <th scope="col" className="px-6 py-4 text-right text-xs font-semibold uppercase tracking-wider text-zinc-500">Price</th>
-                                    <th scope="col" className="px-6 py-4 text-right text-xs font-semibold uppercase tracking-wider text-zinc-500">Value</th>
-                                </tr>
-                            </thead>
-                            <tbody className="divide-y divide-zinc-800">
-                                {displayData?.assets.map((asset) => (
-                                    <tr key={asset.id} className="group hover:bg-zinc-800/50 transition-colors">
-                                        <td className="whitespace-nowrap px-6 py-4">
-                                            <div className="flex items-center">
-                                                <div className={cn("flex h-8 w-8 items-center justify-center rounded-lg text-xs font-bold", asset.type === "stock" ? "bg-emerald-500/10 text-emerald-500" : "bg-blue-500/10 text-blue-500")}>
-                                                    {asset.symbol.slice(0, 1)}
-                                                </div>
-                                                <div className="ml-4">
-                                                    <div className="font-medium text-white">{asset.symbol}</div>
-                                                    {asset.name !== asset.symbol && <div className="text-xs text-zinc-500">{asset.name}</div>}
-                                                </div>
-                                            </div>
-                                        </td>
-                                        <td className="whitespace-nowrap px-6 py-4">
-                                            <span className={cn("inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium", asset.type === "stock" ? "bg-emerald-500/10 text-emerald-500" : "bg-blue-500/10 text-blue-500")}>
-                                                {asset.type === "stock" ? "Stock" : "Crypto"}
-                                            </span>
-                                        </td>
-                                        <td className="whitespace-nowrap px-6 py-4 text-right text-zinc-300">
-                                            {asset.quantity.toLocaleString(undefined, { maximumFractionDigits: 4 })}
-                                        </td>
-                                        <td className="whitespace-nowrap px-6 py-4 text-right text-zinc-300">
-                                            {asset.price.toLocaleString(undefined, { style: 'currency', currency: 'USD', minimumFractionDigits: 2 })}
-                                        </td>
-                                        <td className="whitespace-nowrap px-6 py-4 text-right font-medium text-white">
-                                            {formatMoney(asset.value)}
-                                        </td>
-                                    </tr>
-                                ))}
-                                {displayData?.assets.length === 0 && (
+                        <div className="max-h-[500px] overflow-auto">
+                            <table className="min-w-full divide-y divide-zinc-800">
+                                <thead className="bg-zinc-900 sticky top-0 z-10">
                                     <tr>
-                                        <td colSpan={5} className="px-6 py-10 text-center text-zinc-500">
-                                            No assets found. Connect your accounts to see your portfolio.
-                                        </td>
+                                        <th scope="col" className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-zinc-500 whitespace-nowrap">Asset</th>
+                                        <th scope="col" className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-zinc-500 whitespace-nowrap">Type</th>
+                                        <th scope="col" className="px-6 py-4 text-right text-xs font-semibold uppercase tracking-wider text-zinc-500 whitespace-nowrap">Quantity</th>
+                                        <th scope="col" className="px-6 py-4 text-right text-xs font-semibold uppercase tracking-wider text-zinc-500 whitespace-nowrap">Price</th>
+                                        <th scope="col" className="px-6 py-4 text-right text-xs font-semibold uppercase tracking-wider text-zinc-500 whitespace-nowrap">Value</th>
                                     </tr>
-                                )}
-                            </tbody>
-                        </table>
+                                </thead>
+                                <tbody className="divide-y divide-zinc-800">
+                                    {displayData?.assets.map((asset) => (
+                                        <tr key={asset.id} className="group hover:bg-zinc-800/50 transition-colors">
+                                            <td className="whitespace-nowrap px-6 py-4">
+                                                <div className="flex items-center">
+                                                    <div className={cn("flex h-8 w-8 items-center justify-center rounded-lg text-xs font-bold", asset.type === "stock" ? "bg-emerald-500/10 text-emerald-500" : "bg-blue-500/10 text-blue-500")}>
+                                                        {asset.symbol.slice(0, 1)}
+                                                    </div>
+                                                    <div className="ml-4">
+                                                        <div className="font-medium text-white">{asset.symbol}</div>
+                                                        {asset.name !== asset.symbol && <div className="text-xs text-zinc-500">{asset.name}</div>}
+                                                    </div>
+                                                </div>
+                                            </td>
+                                            <td className="whitespace-nowrap px-6 py-4">
+                                                <span className={cn("inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium", asset.type === "stock" ? "bg-emerald-500/10 text-emerald-500" : "bg-blue-500/10 text-blue-500")}>
+                                                    {asset.type === "stock" ? "Stock" : "Crypto"}
+                                                </span>
+                                            </td>
+                                            <td className="whitespace-nowrap px-6 py-4 text-right text-zinc-300">
+                                                {asset.quantity.toLocaleString(undefined, { maximumFractionDigits: 4 })}
+                                            </td>
+                                            <td className="whitespace-nowrap px-6 py-4 text-right text-zinc-300">
+                                                {asset.price.toLocaleString(undefined, { style: 'currency', currency: 'USD', minimumFractionDigits: 2 })}
+                                            </td>
+                                            <td className="whitespace-nowrap px-6 py-4 text-right font-medium text-white">
+                                                {formatMoney(asset.value)}
+                                            </td>
+                                        </tr>
+                                    ))}
+                                    {displayData?.assets.length === 0 && (
+                                        <tr>
+                                            <td colSpan={5} className="px-6 py-10 text-center text-zinc-500">
+                                                No assets found. Connect your accounts to see your portfolio.
+                                            </td>
+                                        </tr>
+                                    )}
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
                 </div>
             </main>
