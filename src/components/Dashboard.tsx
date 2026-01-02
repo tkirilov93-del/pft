@@ -32,145 +32,136 @@ export default function Dashboard({ onLogout }: DashboardProps) {
         setLoading(true);
         setError(null);
         try {
-            // 1. Fetch Rates
-            const ratesRes = await fetch("/api/rates");
-            const ratesData = await ratesRes.json();
-            const currentRates: { USD: number; EUR: number } = {
-                USD: 1, // Base
-                EUR: ratesData.rates?.EUR || 0.95, // Fallback
-            };
-            setRates(currentRates);
-
             const t212Key = sessionStorage.getItem("t212_key");
             const t212Secret = sessionStorage.getItem("t212_secret");
             const t212Type = sessionStorage.getItem("t212_type"); // 'practice' or 'live'
             const cryptoKey = sessionStorage.getItem("crypto_key");
             const cryptoSecret = sessionStorage.getItem("crypto_secret");
 
-            let allAssets: Asset[] = [];
+            // 2. Fetch All Data in Parallel (Rates, Metadata, T212, Crypto)
+            const [ratesRes, metaRes, t212Res, cryptoRes, tickerRes] = await Promise.all([
+                fetch("/api/rates"),
+                t212Key && t212Secret ? fetch("/api/trading212/metadata", { headers: { Authorization: t212Key, "X-Trading212-Secret": t212Secret, "X-Account-Type": t212Type || "live" } }) : Promise.resolve(null),
+                t212Key && t212Secret ? fetch("/api/trading212", { headers: { Authorization: t212Key, "X-Trading212-Secret": t212Secret, "X-Account-Type": t212Type || "live" } }) : Promise.resolve(null),
+                cryptoKey && cryptoSecret ? fetch("/api/crypto", { headers: { Authorization: cryptoKey, "X-Api-Secret": cryptoSecret } }) : Promise.resolve(null),
+                (cryptoKey || true) ? fetch("/api/crypto/tickers") : Promise.resolve(null) // Always fetch tickers for FX
+            ]);
 
-            // 2. Fetch Trading212
-            if (t212Key && t212Secret) {
-                // Fetch MetaData & Portfolio in parallel
-                const [metaRes, t212Res] = await Promise.all([
-                    fetch("/api/trading212/metadata", {
-                        headers: { Authorization: t212Key, "X-Trading212-Secret": t212Secret, "X-Account-Type": t212Type || "live" }
-                    }),
-                    fetch("/api/trading212", {
-                        headers: {
-                            Authorization: t212Key,
-                            "X-Trading212-Secret": t212Secret,
-                            "X-Account-Type": t212Type || "live"
-                        },
-                    })
-                ]);
+            // --- A. Process FX Rates ---
+            const ratesData = await ratesRes.json();
+            let eurRate = ratesData.rates?.EUR || 0.95; // Fallback
 
-                // Map Metadata
-                const currencyMap = new Map<string, string>(); // Ticker -> CurrencyCode
-                if (metaRes.ok) {
-                    const metaData = await metaRes.json();
-                    if (Array.isArray(metaData)) {
-                        metaData.forEach((item: any) => {
-                            currencyMap.set(item.ticker, item.currencyCode);
-                        });
-                    }
-                }
+            // Try to find Live Rate from Crypto Tickers (USDT_EUR or EUR_USD)
+            const cryptoPriceMap = new Map<string, number>();
+            if (tickerRes && tickerRes.ok) {
+                const tickerData = await tickerRes.json();
+                if (tickerData.result?.data) {
+                    tickerData.result.data.forEach((t: any) => {
+                        // Map prices
+                        if (t.i.endsWith("_USD")) cryptoPriceMap.set(t.i.split("_")[0], parseFloat(t.a));
+                        else if (t.i.endsWith("_USDT")) {
+                            const symbol = t.i.split("_")[0];
+                            if (!cryptoPriceMap.has(symbol)) cryptoPriceMap.set(symbol, parseFloat(t.a));
+                        }
 
-                if (t212Res.ok) {
-                    const t212Data = await t212Res.json();
-                    if (Array.isArray(t212Data)) {
-                        const t212Assets: Asset[] = t212Data.map((pos: any) => {
-                            const nativeCurrency = currencyMap.get(pos.ticker) || pos.currency || "USD"; // Fallback to USD if unknown, but metadata should have it.
-
-                            // Determine Value in USD (Normalization)
-                            let valInUsd = pos.currentPrice * pos.quantity;
-
-                            // If native is EUR, convert to USD base
-                            if (nativeCurrency === "EUR") {
-                                valInUsd = valInUsd * (1 / currentRates.EUR);
-                            } else if (nativeCurrency === "GBP") {
-                                // We don't have GBP rates fetched yet, assuming ~1.27 USD (static fallback or need fetch)
-                                // For now, let's just assume 1:1 if we miss it or add fetch later. 
-                                // Ideally we fetch more rates.
-                                // Let's try to infer if we can.
-                                // NOTE: User only asked for EUR/USD toggle.
-                                // Let's stick to what we have.
-                            }
-
-                            // Wait, if the user holds a EUR stock, T212 reports price in EUR.
-                            // If we want to show total in USD, we must convert EUR -> USD.
-                            // currentRates.EUR is 1 USD = X EUR (e.g. 0.95).
-                            // So 1 EUR = 1 / 0.95 USD.
-
-                            return {
-                                id: `t212-${pos.ticker}`,
-                                symbol: cleanTicker(pos.ticker), // CLEAN NAME HERE
-                                name: cleanTicker(pos.ticker), // Use clean name for display
-                                quantity: pos.quantity,
-                                price: pos.currentPrice, // Native Price
-                                value: pos.currentPrice * pos.quantity, // Native Value
-                                originalValue: pos.currentPrice * pos.quantity,
-                                originalCurrency: nativeCurrency,
-                                type: "stock",
-                                valueUsd: valInUsd // Normalized for totals
-                            };
-                        });
-                        allAssets = [...allAssets, ...t212Assets];
-                    }
+                        // Check for EUR specifically
+                        if (t.i === "EUR_USD") {
+                            // 1 EUR = X USD. So EUR rate (1 USD = Y EUR) is 1/X.
+                            const rate = parseFloat(t.a);
+                            if (rate > 0) eurRate = 1 / rate;
+                        } else if (t.i === "EUR_USDT") {
+                            const rate = parseFloat(t.a);
+                            if (rate > 0) eurRate = 1 / rate;
+                        } else if (t.i === "USD_EUR" || t.i === "USDT_EUR") {
+                            const rate = parseFloat(t.a);
+                            if (rate > 0) eurRate = rate;
+                        }
+                    });
                 }
             }
 
-            // 3. Fetch Crypto
-            if (cryptoKey && cryptoSecret) {
-                // Parallel fetch: Balances and Tickers
-                const [balanceRes, tickerRes] = await Promise.all([
-                    fetch("/api/crypto", { headers: { Authorization: cryptoKey, "X-Api-Secret": cryptoSecret } }),
-                    fetch("/api/crypto/tickers")
-                ]);
+            const currentRates = { USD: 1, EUR: eurRate };
+            setRates(currentRates);
 
-                if (balanceRes.ok && tickerRes.ok) {
-                    const balanceData = await balanceRes.json();
-                    const tickerData = await tickerRes.json();
+            let allAssets: Asset[] = [];
 
-                    // Map tickers for price lookup
-                    const priceMap = new Map<string, number>();
-                    if (tickerData.result?.data) {
-                        tickerData.result.data.forEach((t: any) => {
-                            if (t.i.endsWith("_USD")) {
-                                const symbol = t.i.split("_")[0];
-                                priceMap.set(symbol, parseFloat(t.a));
-                            } else if (t.i.endsWith("_USDT")) {
-                                const symbol = t.i.split("_")[0];
-                                if (!priceMap.has(symbol)) priceMap.set(symbol, parseFloat(t.a));
-                            }
-                        });
-                    }
-
-                    const balances = balanceData.result?.accounts || [];
-                    const cryptoAssets: Asset[] = balances
-                        .filter((b: any) => parseFloat(b.available) > 0 || parseFloat(b.order) > 0)
-                        .map((b: any) => {
-                            const symbol = b.currency;
-                            const qty = parseFloat(b.balance);
-                            const price = priceMap.get(symbol) || 0;
-                            const finalPrice = (symbol === "USD" || symbol === "USDT") ? 1 : price;
-
-                            return {
-                                id: `crypto-${symbol}`,
-                                symbol: symbol,
-                                name: symbol,
-                                quantity: qty,
-                                price: finalPrice,
-                                value: qty * finalPrice,
-                                originalValue: qty * finalPrice,
-                                originalCurrency: "USD",
-                                type: "crypto",
-                                valueUsd: qty * finalPrice
-                            };
-                        });
-
-                    allAssets = [...allAssets, ...cryptoAssets];
+            // --- B. Process Trading212 ---
+            // Map Metadata
+            const currencyMap = new Map<string, string>();
+            if (metaRes && metaRes.ok) {
+                const metaData = await metaRes.json();
+                if (Array.isArray(metaData)) {
+                    metaData.forEach((item: any) => currencyMap.set(item.ticker, item.currencyCode));
                 }
+            }
+
+            if (t212Res && t212Res.ok) {
+                const t212Data = await t212Res.json();
+                if (Array.isArray(t212Data)) {
+                    const t212Assets: Asset[] = t212Data.map((pos: any) => {
+                        const nativeCurrency = currencyMap.get(pos.ticker) || pos.currency || "USD";
+                        let valInUsd = pos.currentPrice * pos.quantity;
+
+                        if (nativeCurrency === "EUR") {
+                            // Convert EUR -> USD. (val / eurRate)
+                            // eurRate is "How many EUR in 1 USD". 
+                            // Example: 1 USD = 0.85 EUR. 
+                            // 100 EUR -> 100 / 0.85 = 117 USD.
+                            valInUsd = valInUsd * (1 / currentRates.EUR);
+                        } else if (nativeCurrency === "GBP") {
+                            // Attempt to find GBP/USD in crypto map?
+                            const gbpUsd = cryptoPriceMap.get("GBP"); // if GBP_USDT exists
+                            if (gbpUsd) {
+                                valInUsd = valInUsd * gbpUsd;
+                            } else {
+                                // Fallback static or ignore
+                                valInUsd = valInUsd * 1.25; // Approx default
+                            }
+                        }
+
+                        return {
+                            id: `t212-${pos.ticker}`,
+                            symbol: cleanTicker(pos.ticker),
+                            name: cleanTicker(pos.ticker),
+                            quantity: pos.quantity,
+                            price: pos.currentPrice,
+                            value: pos.currentPrice * pos.quantity,
+                            originalValue: pos.currentPrice * pos.quantity,
+                            originalCurrency: nativeCurrency,
+                            type: "stock",
+                            valueUsd: valInUsd
+                        };
+                    });
+                    allAssets = [...allAssets, ...t212Assets];
+                }
+            }
+
+            // --- C. Process Crypto ---
+            if (cryptoRes && cryptoRes.ok) {
+                const balanceData = await cryptoRes.json();
+                const balances = balanceData.result?.accounts || [];
+                const cryptoAssets: Asset[] = balances
+                    .filter((b: any) => parseFloat(b.available) > 0 || parseFloat(b.order) > 0)
+                    .map((b: any) => {
+                        const symbol = b.currency;
+                        const qty = parseFloat(b.balance);
+                        const price = cryptoPriceMap.get(symbol) || 0;
+                        const finalPrice = (symbol === "USD" || symbol === "USDT") ? 1 : price;
+
+                        return {
+                            id: `crypto-${symbol}`,
+                            symbol: symbol,
+                            name: symbol,
+                            quantity: qty,
+                            price: finalPrice,
+                            value: qty * finalPrice,
+                            originalValue: qty * finalPrice,
+                            originalCurrency: "USD",
+                            type: "crypto",
+                            valueUsd: qty * finalPrice
+                        };
+                    });
+                allAssets = [...allAssets, ...cryptoAssets];
             }
 
             const totalUsd = allAssets.reduce((sum, a) => sum + (a as any).valueUsd, 0);
