@@ -2,9 +2,10 @@
 
 import { useEffect, useState, useMemo, useRef } from "react";
 import { Asset, PortfolioData } from "./types";
-import { Loader2, LogOut, RefreshCw, TrendingUp, TrendingDown, PieChart as PieIcon, List } from "lucide-react";
+import { Loader2, LogOut, RefreshCw, TrendingUp, TrendingDown, PieChart as PieIcon, AlertTriangle, AlertCircle, X } from "lucide-react";
 import { cn, cleanTicker } from "@/lib/utils";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
+import HistoryChart from "./HistoryChart";
 
 interface DashboardProps {
     onLogout: () => void;
@@ -16,8 +17,11 @@ export default function Dashboard({ onLogout }: DashboardProps) {
     const [currency, setCurrency] = useState<"EUR" | "USD">("EUR");
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const [isStale, setIsStale] = useState(false);
+    const [lastUpdated, setLastUpdated] = useState<number | null>(null);
     const [data, setData] = useState<PortfolioData | null>(null);
     const [rates, setRates] = useState<{ EUR: number; USD: number } | null>(null);
+    const [history, setHistory] = useState<{ date: string; value: number }[]>([]);
 
     const formatMoney = (value: number) => {
         return new Intl.NumberFormat("en-US", {
@@ -28,45 +32,57 @@ export default function Dashboard({ onLogout }: DashboardProps) {
 
     const initialized = useRef(false);
 
+    // Load history/cache on mount
+    useEffect(() => {
+        const savedHistory = localStorage.getItem("portfolio_history");
+        if (savedHistory) {
+            try {
+                setHistory(JSON.parse(savedHistory));
+            } catch (e) { console.error("History parse error", e); }
+        }
+    }, []);
+
     const fetchData = async () => {
         setLoading(true);
         setError(null);
+        setIsStale(false);
         try {
             const t212Key = sessionStorage.getItem("t212_key");
             const t212Secret = sessionStorage.getItem("t212_secret");
-            const t212Type = sessionStorage.getItem("t212_type"); // 'practice' or 'live'
+            const t212Type = sessionStorage.getItem("t212_type");
             const cryptoKey = sessionStorage.getItem("crypto_key");
             const cryptoSecret = sessionStorage.getItem("crypto_secret");
 
-            // 2. Fetch All Data in Parallel (Rates, Metadata, T212, Crypto)
+            // 2. Fetch All Data in Parallel
             const [ratesRes, metaRes, t212Res, cryptoRes, tickerRes] = await Promise.all([
                 fetch("/api/rates"),
                 t212Key && t212Secret ? fetch("/api/trading212/metadata", { headers: { Authorization: t212Key, "X-Trading212-Secret": t212Secret, "X-Account-Type": t212Type || "live" } }) : Promise.resolve(null),
                 t212Key && t212Secret ? fetch("/api/trading212", { headers: { Authorization: t212Key, "X-Trading212-Secret": t212Secret, "X-Account-Type": t212Type || "live" } }) : Promise.resolve(null),
                 cryptoKey && cryptoSecret ? fetch("/api/crypto", { headers: { Authorization: cryptoKey, "X-Api-Secret": cryptoSecret } }) : Promise.resolve(null),
-                (cryptoKey || true) ? fetch("/api/crypto/tickers") : Promise.resolve(null) // Always fetch tickers for FX
+                (cryptoKey || true) ? fetch("/api/crypto/tickers") : Promise.resolve(null)
             ]);
+
+            // CHECK ERRORS
+            // If T212 or Crypto was requested but failed (and not 404 which is handled inside proxy usually)
+            if (t212Res && !t212Res.ok) throw new Error(`Trading212 Error: ${t212Res.statusText}`);
+            if (cryptoRes && !cryptoRes.ok) throw new Error(`Crypto.com Error: ${cryptoRes.statusText}`);
 
             // --- A. Process FX Rates ---
             const ratesData = await ratesRes.json();
-            let eurRate = ratesData.rates?.EUR || 0.95; // Fallback
+            let eurRate = ratesData.rates?.EUR || 0.95;
 
-            // Try to find Live Rate from Crypto Tickers (USDT_EUR or EUR_USD)
             const cryptoPriceMap = new Map<string, number>();
             if (tickerRes && tickerRes.ok) {
                 const tickerData = await tickerRes.json();
                 if (tickerData.result?.data) {
                     tickerData.result.data.forEach((t: any) => {
-                        // Map prices
                         if (t.i.endsWith("_USD")) cryptoPriceMap.set(t.i.split("_")[0], parseFloat(t.a));
                         else if (t.i.endsWith("_USDT")) {
                             const symbol = t.i.split("_")[0];
                             if (!cryptoPriceMap.has(symbol)) cryptoPriceMap.set(symbol, parseFloat(t.a));
                         }
 
-                        // Check for EUR specifically
                         if (t.i === "EUR_USD") {
-                            // 1 EUR = X USD. So EUR rate (1 USD = Y EUR) is 1/X.
                             const rate = parseFloat(t.a);
                             if (rate > 0) eurRate = 1 / rate;
                         } else if (t.i === "EUR_USDT") {
@@ -103,19 +119,13 @@ export default function Dashboard({ onLogout }: DashboardProps) {
                         let valInUsd = pos.currentPrice * pos.quantity;
 
                         if (nativeCurrency === "EUR") {
-                            // Convert EUR -> USD. (val / eurRate)
-                            // eurRate is "How many EUR in 1 USD". 
-                            // Example: 1 USD = 0.85 EUR. 
-                            // 100 EUR -> 100 / 0.85 = 117 USD.
                             valInUsd = valInUsd * (1 / currentRates.EUR);
                         } else if (nativeCurrency === "GBP") {
-                            // Attempt to find GBP/USD in crypto map?
-                            const gbpUsd = cryptoPriceMap.get("GBP"); // if GBP_USDT exists
+                            const gbpUsd = cryptoPriceMap.get("GBP");
                             if (gbpUsd) {
                                 valInUsd = valInUsd * gbpUsd;
                             } else {
-                                // Fallback static or ignore
-                                valInUsd = valInUsd * 1.25; // Approx default
+                                valInUsd = valInUsd * 1.25;
                             }
                         }
 
@@ -168,16 +178,49 @@ export default function Dashboard({ onLogout }: DashboardProps) {
             const equityUsd = allAssets.filter(a => a.type === "stock").reduce((sum, a) => sum + (a as any).valueUsd, 0);
             const cryptoUsd = allAssets.filter(a => a.type === "crypto").reduce((sum, a) => sum + (a as any).valueUsd, 0);
 
-            setData({
+            const newData = {
                 totalValue: totalUsd,
-                assets: allAssets, // These have valueUsd attached
+                assets: allAssets,
                 equityValue: equityUsd,
                 cryptoValue: cryptoUsd
+            };
+
+            setData(newData);
+            setLastUpdated(Date.now());
+
+            // --- SAVE TO CACHE & HISTORY ---
+            localStorage.setItem("portfolio_cache", JSON.stringify({ data: newData, rates: currentRates, timestamp: Date.now() }));
+
+            // Update History logic (One entry per day)
+            const today = new Date().toISOString().split('T')[0];
+
+            setHistory(prev => {
+                const historyCopy = [...prev];
+                const existingIndex = historyCopy.findIndex(h => h.date === today);
+                if (existingIndex >= 0) {
+                    historyCopy[existingIndex].value = totalUsd;
+                } else {
+                    historyCopy.push({ date: today, value: totalUsd });
+                }
+                localStorage.setItem("portfolio_history", JSON.stringify(historyCopy));
+                return historyCopy;
             });
 
-        } catch (err) {
+
+        } catch (err: any) {
             console.error(err);
-            setError("Failed to load portfolio data. Check your API keys and connection.");
+            const errorMsg = err.message || "Unknown error occurred";
+            setError(errorMsg);
+
+            // FALLBACK TO CACHE
+            const cached = localStorage.getItem("portfolio_cache");
+            if (cached) {
+                const parsed = JSON.parse(cached);
+                setData(parsed.data);
+                setRates(parsed.rates);
+                setLastUpdated(parsed.timestamp);
+                setIsStale(true);
+            }
         } finally {
             setLoading(false);
         }
@@ -211,6 +254,17 @@ export default function Dashboard({ onLogout }: DashboardProps) {
         { name: "Crypto", value: displayData.cryptoValue }
     ] : [];
 
+    // History in Selected Currency
+    const historyData = useMemo(() => {
+        if (!history || !rates) return [];
+        const rate = currency === "EUR" ? rates.EUR : 1;
+        return history.map(h => ({
+            ...h,
+            value: h.value * rate
+        }));
+    }, [history, currency, rates]);
+
+
     if (loading && !data) {
         return (
             <div className="flex h-screen w-full items-center justify-center bg-black text-emerald-500">
@@ -233,6 +287,14 @@ export default function Dashboard({ onLogout }: DashboardProps) {
                     </div>
 
                     <div className="flex items-center gap-4">
+                        {/* Stale Data Indicator */}
+                        {isStale && lastUpdated && (
+                            <div className="hidden sm:flex items-center gap-2 rounded-full bg-yellow-500/10 px-3 py-1 text-xs font-medium text-yellow-500 ring-1 ring-yellow-500/20">
+                                <AlertTriangle className="h-3 w-3" />
+                                <span>Using cached data ({new Date(lastUpdated).toLocaleTimeString()})</span>
+                            </div>
+                        )}
+
                         <div className="flex items-center rounded-lg border border-zinc-800 bg-zinc-900 p-1">
                             <button
                                 onClick={() => setCurrency("EUR")}
@@ -249,7 +311,7 @@ export default function Dashboard({ onLogout }: DashboardProps) {
                         </div>
 
                         <button onClick={fetchData} className="p-2 text-zinc-400 hover:text-white transition-colors">
-                            <RefreshCw className="h-5 w-5" />
+                            <RefreshCw className={cn("h-5 w-5", loading ? "animate-spin" : "")} />
                         </button>
                         <button onClick={onLogout} className="p-2 text-zinc-400 hover:text-red-400 transition-colors">
                             <LogOut className="h-5 w-5" />
@@ -258,29 +320,49 @@ export default function Dashboard({ onLogout }: DashboardProps) {
                 </div>
             </header>
 
+            {/* ERROR BANNER */}
+            {error && (
+                <div className="sticky top-16 z-10 w-full bg-red-500/10 px-4 py-3 border-b border-red-500/20 backdrop-blur">
+                    <div className="mx-auto flex max-w-7xl items-center justify-between">
+                        <div className="flex items-center gap-3">
+                            <AlertCircle className="h-5 w-5 text-red-500" />
+                            <p className="text-sm font-medium text-red-400">
+                                {isStale ? "Connection Failed. Showing cached data." : "Failed to load portfolio."}
+                                <span className="ml-2 opacity-75 border-l border-red-500/30 pl-2">{error}</span>
+                            </p>
+                        </div>
+                        <button onClick={() => setError(null)} className="text-red-400 hover:text-red-300"><X className="h-5 w-5" /></button>
+                    </div>
+                </div>
+            )}
+
             {/* Main Content */}
             <main className="mx-auto max-w-7xl px-4 pt-10 sm:px-6 lg:px-8">
-                {error && (
-                    <div className="mb-6 rounded-lg border border-red-500/20 bg-red-500/10 p-4 text-red-500">
-                        {error}
-                    </div>
-                )}
 
                 {/* Hero Stats */}
                 <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
                     <div className="col-span-2 rounded-3xl border border-zinc-800 bg-zinc-900/50 p-8 backdrop-blur-sm sm:col-span-2 lg:col-span-2">
-                        <span className="text-sm font-medium text-zinc-400">Total Net Worth</span>
-                        <h2 className="mt-2 text-5xl font-bold tracking-tight text-white space-x-1">
-                            {displayData ? formatMoney(displayData.totalValue) : "---"}
-                        </h2>
-                        <div className="mt-6 flex items-center gap-4">
-                            <div className="flex items-center gap-2">
-                                <div className="h-3 w-3 rounded-full bg-emerald-500"></div>
-                                <span className="text-sm text-zinc-400">Stocks: <span className="text-zinc-200">{displayData ? formatMoney(displayData.equityValue) : "-"}</span></span>
+                        <div className="flex items-start justify-between">
+                            <div>
+                                <span className="text-sm font-medium text-zinc-400">Total Net Worth</span>
+                                <h2 className="mt-2 text-5xl font-bold tracking-tight text-white space-x-1">
+                                    {displayData ? formatMoney(displayData.totalValue) : "---"}
+                                </h2>
+                                <div className="mt-6 flex items-center gap-4">
+                                    <div className="flex items-center gap-2">
+                                        <div className="h-3 w-3 rounded-full bg-emerald-500"></div>
+                                        <span className="text-sm text-zinc-400">Stocks: <span className="text-zinc-200">{displayData ? formatMoney(displayData.equityValue) : "-"}</span></span>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <div className="h-3 w-3 rounded-full bg-blue-500"></div>
+                                        <span className="text-sm text-zinc-400">Crypto: <span className="text-zinc-200">{displayData ? formatMoney(displayData.cryptoValue) : "-"}</span></span>
+                                    </div>
+                                </div>
                             </div>
-                            <div className="flex items-center gap-2">
-                                <div className="h-3 w-3 rounded-full bg-blue-500"></div>
-                                <span className="text-sm text-zinc-400">Crypto: <span className="text-zinc-200">{displayData ? formatMoney(displayData.cryptoValue) : "-"}</span></span>
+
+                            {/* HISTORY CHART */}
+                            <div className="hidden md:block h-32 w-48 opacity-75">
+                                <HistoryChart data={historyData} currency={currency} />
                             </div>
                         </div>
                     </div>
@@ -334,8 +416,23 @@ export default function Dashboard({ onLogout }: DashboardProps) {
                                         <tr key={asset.id} className="group hover:bg-zinc-800/50 transition-colors">
                                             <td className="whitespace-nowrap px-6 py-4">
                                                 <div className="flex items-center">
-                                                    <div className={cn("flex h-8 w-8 items-center justify-center rounded-lg text-xs font-bold", asset.type === "stock" ? "bg-emerald-500/10 text-emerald-500" : "bg-blue-500/10 text-blue-500")}>
-                                                        {asset.symbol.slice(0, 1)}
+                                                    <div className={cn("relative flex h-8 w-8 items-center justify-center rounded-lg overflow-hidden shrink-0", asset.type === "stock" ? "bg-emerald-500/10 text-emerald-500" : "bg-blue-500/10 text-blue-500")}>
+                                                        {asset.type === "crypto" ? (
+                                                            <img
+                                                                src={`https://assets.coincap.io/assets/icons/${asset.symbol.toLowerCase()}@2x.png`}
+                                                                alt={asset.symbol}
+                                                                className="h-full w-full object-cover"
+                                                                onError={(e) => {
+                                                                    (e.target as HTMLImageElement).style.display = 'none';
+                                                                    (e.target as HTMLImageElement).nextElementSibling?.classList.remove('hidden');
+                                                                }}
+                                                            />
+                                                        ) : null}
+
+                                                        {/* FALLBACK FOR STOCKS OR BROKEN CRYPTO ICONS */}
+                                                        <span className={cn("absolute inset-0 flex items-center justify-center text-xs font-bold", asset.type === "crypto" ? "hidden" : "")}>
+                                                            {asset.symbol.slice(0, 1)}
+                                                        </span>
                                                     </div>
                                                     <div className="ml-4">
                                                         <div className="font-medium text-white">{asset.symbol}</div>
