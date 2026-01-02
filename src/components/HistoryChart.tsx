@@ -52,8 +52,8 @@ export default function HistoryChart({ data, currency }: HistoryChartProps) {
                             fontSize: "12px",
                         }}
                         itemStyle={{ color: "#fff" }}
-                        formatter={(value: number) => [
-                            new Intl.NumberFormat("en-US", { style: "currency", currency }).format(value),
+                        formatter={(value: any) => [
+                            new Intl.NumberFormat("en-US", { style: "currency", currency }).format(Number(value)),
                             "Value"
                         ]}
                         labelFormatter={(label) => label}
