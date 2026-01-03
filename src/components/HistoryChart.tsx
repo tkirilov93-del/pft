@@ -43,6 +43,7 @@ export default function HistoryChart({ data, currency }: HistoryChartProps) {
                             <stop offset="95%" stopColor={isPositive ? "#10b981" : "#ef4444"} stopOpacity={0} />
                         </linearGradient>
                     </defs>
+                    <XAxis dataKey="date" hide />
                     <Tooltip
                         contentStyle={{
                             backgroundColor: "#18181b",
