@@ -417,7 +417,17 @@ export default function Dashboard({ onLogout }: DashboardProps) {
                                             <td className="whitespace-nowrap px-6 py-4">
                                                 <div className="flex items-center">
                                                     <div className={cn("relative flex h-8 w-8 items-center justify-center rounded-lg overflow-hidden shrink-0", asset.type === "stock" ? "bg-emerald-500/10 text-emerald-500" : "bg-blue-500/10 text-blue-500")}>
-                                                        {asset.type === "crypto" ? (
+                                                        {asset.type === "stock" ? (
+                                                            <img
+                                                                src={`https://img.logo.dev/ticker/${asset.symbol}?token=pk_Zdv89aXoRyWNu8sMG7WBbw`}
+                                                                alt={asset.symbol}
+                                                                className="h-full w-full object-cover"
+                                                                onError={(e) => {
+                                                                    (e.target as HTMLImageElement).style.display = 'none';
+                                                                    (e.target as HTMLImageElement).nextElementSibling?.classList.remove('hidden');
+                                                                }}
+                                                            />
+                                                        ) : asset.type === "crypto" ? (
                                                             <img
                                                                 src={`https://assets.coincap.io/assets/icons/${asset.symbol.toLowerCase()}@2x.png`}
                                                                 alt={asset.symbol}
