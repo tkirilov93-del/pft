@@ -429,8 +429,8 @@ export default function Dashboard({ onLogout }: DashboardProps) {
                                                             />
                                                         ) : null}
 
-                                                        {/* FALLBACK FOR STOCKS OR BROKEN CRYPTO ICONS */}
-                                                        <span className={cn("absolute inset-0 flex items-center justify-center text-xs font-bold", asset.type === "crypto" ? "hidden" : "")}>
+                                                        {/* FALLBACK (Hidden by default, shown on error) */}
+                                                        <span className="hidden absolute inset-0 flex items-center justify-center text-xs font-bold">
                                                             {asset.symbol.slice(0, 1)}
                                                         </span>
                                                     </div>
