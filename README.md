@@ -1,36 +1,74 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Investment Portfolio Tracker
 
-## Getting Started
+A secure, private, and modern web application for tracking your stock and crypto investments in real-time. Built with Next.js 15.
 
-First, run the development server:
+## 🚀 Features
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+-   **Real-Time Tracking**: view your total net worth, updated live.
+-   **Privacy First**: Your API keys are encrypted with AES and stored **locally** on your device. Nothing is sent to our servers.
+-   **Multi-Asset Support**: Track Stocks (via Trading212) and Crypto (via Crypto.com) in one place.
+-   **Currency Toggle**: Instantly switch your dashboard view between **USD** and **EUR**.
+-   **Historical Data**: Automatically tracks and visualizes your portfolio value over time.
+-   **Smart Caching**: Minimizes API usage with intelligent caching and stale data fallback.
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## 🛠️ Tech Stack
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+-   **Framework**: [Next.js 15](https://nextjs.org/) (App Router)
+-   **Styling**: [Tailwind CSS](https://tailwindcss.com/)
+-   **Charts**: [Recharts](https://recharts.org/)
+-   **Icons**: [Lucide React](https://lucide.dev/)
+-   **Encryption**: [CryptoJS](https://github.com/brix/crypto-js)
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## 🔌 API Services
 
-## Learn More
+This application integrates with several services to provide data:
 
-To learn more about Next.js, take a look at the following resources:
+| Service | Purpose | Notes |
+| :--- | :--- | :--- |
+| **Trading212** | Stock Portfolio Data | Requires API Key (Read-only recommended) |
+| **Crypto.com** | Crypto Portfolio Data | Requires API Key & Secret |
+| **Frankfurter** | FX Rates (EUR/USD) | Open Source API, no key required |
+| **Logo.dev** | Stock Ticker Logos | Uses public key |
+| **Coincap.io** | Crypto Icon Assets | For displaying crypto logos |
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## 🔒 Security & Privacy
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+This application is designed with a "Local Vault" architecture:
 
-## Deploy on Vercel
+1.  **Client-Side Encryption**: Your API keys are encrypted using a PIN you create.
+2.  **Local Storage**: The encrypted vault is stored in your browser's `localStorage`.
+3.  **No Backend Storage**: We do not have a database. Your keys never leave your device unencrypted.
+4.  **Proxied Requests**: API requests are proxied through the Next.js API routes solely to avoid CORS issues and securely append headers.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## 📦 Getting Started
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+1.  **Clone the repository**:
+    ```bash
+    git clone https://github.com/yourusername/portfolio-tracker.git
+    cd portfolio-tracker
+    ```
+
+2.  **Install dependencies**:
+    ```bash
+    npm install
+    # or
+    pnpm install
+    ```
+
+3.  **Run the development server**:
+    ```bash
+    npm run dev
+    ```
+
+4.  **Open the App**:
+    Navigate to [http://localhost:3000](http://localhost:3000).
+
+5.  **Setup Keys**:
+    -   You will be prompted to create a PIN.
+    -   Enter your **Trading212** API Key.
+    -   Enter your **Crypto.com** Exchange API Key & Secret.
+    -   (Optional) The **Logo.dev** key is pre-configured.
+
+## ⚠️ Disclaimer
+
+This is a personal project. Use at your own risk. Always use **Read-Only** API keys where possible to ensure the security of your funds.
